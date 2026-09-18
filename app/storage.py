@@ -1,7 +1,9 @@
-"""On-disk layout for chunk bodies and published artifacts.
+"""磁盘布局：旧版按会话分片路径（惰性提升用）与成品文件。
 
-Every write goes to a temp file, is fsynced, and is then moved into place with
-os.replace so a crash never leaves a half-written file at a final path.
+新上传的正文由 :mod:`app.pool` 内容寻址保存；本模块只保留：
+
+- 兼容旧卷的 ``chunks/<session_id>/<index>.chunk`` 路径解析；
+- 成品的顺序组装、fsync 与原子发布。
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ import hashlib
 import os
 import uuid
 from pathlib import Path
-from typing import AsyncIterable, Iterable
+from typing import Iterable
 
 _COPY_BUFFER = 1024 * 1024
 
@@ -32,38 +34,8 @@ class ChunkStore:
     def artifact_path(self, session_id: str) -> Path:
         return self.artifacts_dir / f"{session_id}.bin"
 
-    async def write_chunk_tmp(self, session_id: str, stream: AsyncIterable[bytes]) -> tuple[Path, int, str]:
-        """Stream a request body to a temp file; returns (tmp_path, size, sha256).
-
-        The caller validates size/digest before committing the temp file with
-        commit_tmp(); nothing is visible at the final path until then.
-        """
-        target_dir = self.chunk_dir(session_id)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        tmp = target_dir / f".{uuid.uuid4().hex}.tmp"
-        hasher = hashlib.sha256()
-        size = 0
-        try:
-            with open(tmp, "wb") as fh:
-                async for part in stream:
-                    if not part:
-                        continue
-                    hasher.update(part)
-                    fh.write(part)
-                    size += len(part)
-                fh.flush()
-                os.fsync(fh.fileno())
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
-        return tmp, size, hasher.hexdigest()
-
-    def commit_tmp(self, tmp: Path, final: Path) -> None:
-        os.replace(tmp, final)
-        _fsync_dir(final.parent)
-
     def assemble_to_tmp(self, paths: Iterable[Path]) -> tuple[Path, int, str]:
-        """Concatenate chunk files in order; returns (tmp_path, size, sha256)."""
+        """按序拼接正文；直接顺序读取池正文/旧分片，不复制整套分片。"""
         tmp = self.artifacts_dir / f".{uuid.uuid4().hex}.tmp"
         hasher = hashlib.sha256()
         size = 0
@@ -100,6 +72,9 @@ class ChunkStore:
 
     def purge_tmp(self) -> None:
         for entry in self.artifacts_dir.glob("*.tmp"):
+            entry.unlink(missing_ok=True)
+        # 旧布局 chunks 目录下的残留临时文件。
+        for entry in self.chunks_root.glob("*/*.tmp"):
             entry.unlink(missing_ok=True)
 
 

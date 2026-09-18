@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from .schemas import CreateSessionRequest
+from .schemas import CreateSessionRequest, ReclaimRequest, ReuseRequest
 from .service import UploadService
 
 
@@ -30,6 +30,17 @@ def build_router(service: UploadService) -> APIRouter:
         )
         return JSONResponse(status_code=status_code, content=body)
 
+    @router.post(
+        "/sessions/{session_id}/chunks/{chunk_index}/reuse", status_code=201
+    )
+    def reuse_chunk(
+        session_id: str, chunk_index: str, payload: ReuseRequest
+    ) -> JSONResponse:
+        body, status_code = service.reuse_chunk(
+            session_id, chunk_index, payload.sha256
+        )
+        return JSONResponse(status_code=status_code, content=body)
+
     @router.post("/sessions/{session_id}/finalize")
     def finalize(session_id: str) -> dict:
         return service.finalize(session_id)
@@ -43,5 +54,9 @@ def build_router(service: UploadService) -> APIRouter:
             filename=f"{session_id}.bin",
             headers={"X-File-SHA256": sha256},
         )
+
+    @router.post("/maintenance/chunk-pool/reclaim")
+    def reclaim_chunk_pool(payload: ReclaimRequest) -> dict:
+        return service.reclaim_pool(payload.max_blobs)
 
     return router

@@ -269,6 +269,7 @@ def test_restart_resumes_from_confirmed_chunks(data_dir):
 
     # leftovers of an unclean shutdown: a temp file and an orphan chunk file
     chunk_dir = data_dir / "chunks" / sid
+    chunk_dir.mkdir(parents=True, exist_ok=True)
     (chunk_dir / ".partial.tmp").write_bytes(b"half-written")
     (chunk_dir / "00000001.chunk").write_bytes(chunk(payload, 4, 1))  # never committed to SQLite
 

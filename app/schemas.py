@@ -6,6 +6,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field, field_validator
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_LOWER_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class CreateSessionRequest(BaseModel):
@@ -27,3 +28,21 @@ class CreateSessionRequest(BaseModel):
         if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
             raise ValueError("expires_at must include an explicit timezone")
         return value
+
+
+class ReuseRequest(BaseModel):
+    """复用确认请求体：仅含小写 SHA-256。"""
+
+    sha256: str = Field(description="lowercase SHA-256 of an already pooled chunk body")
+
+    @field_validator("sha256")
+    @classmethod
+    def _validate_sha256(cls, value: str) -> str:
+        value = value.strip()
+        if not _LOWER_SHA256_RE.fullmatch(value):
+            raise ValueError("sha256 must be exactly 64 lowercase hexadecimal characters")
+        return value
+
+
+class ReclaimRequest(BaseModel):
+    max_blobs: int = Field(ge=1, le=1000, description="at most this many pool candidates are examined per call")

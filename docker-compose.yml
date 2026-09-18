@@ -4,16 +4,23 @@ services:
     image: chunked-upload-api:latest
     environment:
       DATA_DIR: /data
+      API_WORKERS: "2"
     volumes:
       - upload-data:/data
     ports:
       - "${API_PORT:-8000}:8000"
+    # 两个独立 worker 进程共享同一个 SQLite 文件与数据卷；正确性只依赖
+    # SQLite WAL 写事务串行化与同卷原子改名，不依赖进程内锁。
+    command:
+      - "sh"
+      - "-c"
+      - "uvicorn app.asgi:app --host 0.0.0.0 --port 8000 --workers ${API_WORKERS:-2}"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
       interval: 2s
       timeout: 5s
       retries: 30
-      start_period: 5s
+      start_period: 10s
 
   verify:
     image: chunked-upload-api:latest

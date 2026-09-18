@@ -12,6 +12,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .config import Settings
 from .db import Database
 from .errors import ApiError, error_body
+from .pool import ChunkPool
+from .reclaim import Reclaimer
 from .routes import build_router
 from .service import UploadService, reconcile
 from .storage import ChunkStore
@@ -25,8 +27,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     db = Database(settings.data_dir / "db.sqlite3")
     store = ChunkStore(settings.data_dir)
-    reconcile(db, store)
-    service = UploadService(db, store)
+    pool = ChunkPool(settings.data_dir / "pool")
+    reclaimer = Reclaimer(db, pool)
+    reconcile(db, store, pool, reclaimer)
+    service = UploadService(db, store, pool)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
