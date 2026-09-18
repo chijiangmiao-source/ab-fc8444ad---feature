@@ -11,6 +11,10 @@ def set_bit(bitmap, index: int) -> None:
     bitmap[index >> 3] |= 1 << (index & 7)
 
 
+def clear_bit(bitmap, index: int) -> None:
+    bitmap[index >> 3] &= ~(1 << (index & 7))
+
+
 def is_set(bitmap, index: int) -> bool:
     return bool(bitmap[index >> 3] & (1 << (index & 7)))
 

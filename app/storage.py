@@ -1,7 +1,18 @@
-"""On-disk layout for chunk bodies and published artifacts.
+"""On-disk layout for chunk bodies, the content-addressed pool and artifacts.
 
-Every write goes to a temp file, is fsynced, and is then moved into place with
-os.replace so a crash never leaves a half-written file at a final path.
+Every write goes to a temp file, is fsynced, and is then linked or moved into
+place atomically, so a crash never leaves a half-written file at a final path.
+
+Layout under DATA_DIR:
+
+    chunks/<session_id>/<index>.chunk       legacy per-session bodies (pre-pool volumes)
+    pool/tmp/.<uuid>.tmp                    staging area for bodies being uploaded
+    pool/blobs/<sha>-<size>-<id>.blob       one file per published body, shared pool-wide
+    artifacts/<session_id>.bin              published artifacts (atomic rename)
+
+Pool blob file names carry a unique suffix so a re-published body never shares
+a path with a previously sealed/deleted incarnation of the same content; that
+is what makes reclaim-vs-republish races safe without any file locking.
 """
 
 from __future__ import annotations
@@ -20,8 +31,15 @@ class ChunkStore:
         self.root = root
         self.chunks_root = root / "chunks"
         self.artifacts_dir = root / "artifacts"
+        self.pool_dir = root / "pool"
+        self.pool_blobs_dir = self.pool_dir / "blobs"
+        self.pool_tmp_dir = self.pool_dir / "tmp"
         self.chunks_root.mkdir(parents=True, exist_ok=True)
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        self.pool_blobs_dir.mkdir(parents=True, exist_ok=True)
+        self.pool_tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- legacy per-session layout (kept for pre-pool volumes) ----
 
     def chunk_dir(self, session_id: str) -> Path:
         return self.chunks_root / session_id
@@ -29,18 +47,20 @@ class ChunkStore:
     def chunk_path(self, session_id: str, index: int) -> Path:
         return self.chunk_dir(session_id) / f"{index:08d}.chunk"
 
+    # ---- artifacts ----
+
     def artifact_path(self, session_id: str) -> Path:
         return self.artifacts_dir / f"{session_id}.bin"
 
-    async def write_chunk_tmp(self, session_id: str, stream: AsyncIterable[bytes]) -> tuple[Path, int, str]:
-        """Stream a request body to a temp file; returns (tmp_path, size, sha256).
+    # ---- staging ----
 
-        The caller validates size/digest before committing the temp file with
-        commit_tmp(); nothing is visible at the final path until then.
+    async def write_tmp(self, stream: AsyncIterable[bytes]) -> tuple[Path, int, str]:
+        """Stream a request body to a pool temp file; returns (tmp, size, sha256).
+
+        The caller validates size/digest before publishing the temp file into
+        the pool; nothing is visible at a final path until then.
         """
-        target_dir = self.chunk_dir(session_id)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        tmp = target_dir / f".{uuid.uuid4().hex}.tmp"
+        tmp = self.pool_tmp_dir / f".{uuid.uuid4().hex}.tmp"
         hasher = hashlib.sha256()
         size = 0
         try:
@@ -58,12 +78,25 @@ class ChunkStore:
             raise
         return tmp, size, hasher.hexdigest()
 
-    def commit_tmp(self, tmp: Path, final: Path) -> None:
-        os.replace(tmp, final)
-        _fsync_dir(final.parent)
+    # ---- pool ----
+
+    def pool_blob_path(self, sha256: str, size: int) -> Path:
+        """Fresh, unique final path for a to-be-published body."""
+        return self.pool_blobs_dir / f"{sha256}-{size}-{uuid.uuid4().hex[:16]}.blob"
+
+    def link_into_pool(self, source: Path, dest: Path) -> None:
+        """Atomically publish `source` at `dest` (hard link + dir fsync).
+
+        The source is kept; the caller unlinks it once the matching database
+        reference has committed.
+        """
+        os.link(source, dest)
+        fsync_dir(dest.parent)
+
+    # ---- assembly / publish ----
 
     def assemble_to_tmp(self, paths: Iterable[Path]) -> tuple[Path, int, str]:
-        """Concatenate chunk files in order; returns (tmp_path, size, sha256)."""
+        """Concatenate chunk bodies in order; returns (tmp_path, size, sha256)."""
         tmp = self.artifacts_dir / f".{uuid.uuid4().hex}.tmp"
         hasher = hashlib.sha256()
         size = 0
@@ -88,22 +121,26 @@ class ChunkStore:
     def publish(self, tmp: Path, session_id: str) -> Path:
         final = self.artifact_path(session_id)
         os.replace(tmp, final)
-        _fsync_dir(final.parent)
+        fsync_dir(final.parent)
         return final
 
     @staticmethod
     def discard(path: Path) -> None:
         try:
-            path.unlink(missing_ok=True)
+            Path(path).unlink(missing_ok=True)
         except OSError:
             pass
 
-    def purge_tmp(self) -> None:
-        for entry in self.artifacts_dir.glob("*.tmp"):
-            entry.unlink(missing_ok=True)
+
+def hash_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(_COPY_BUFFER), b""):
+            hasher.update(block)
+    return hasher.hexdigest()
 
 
-def _fsync_dir(path: Path) -> None:
+def fsync_dir(path: Path) -> None:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     fd = os.open(path, flags)
     try:
